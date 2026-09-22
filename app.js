@@ -35,7 +35,14 @@ async function decryptCredentials(blob,pin){
   return JSON.parse(new TextDecoder().decode(plain));
 }
 function auth(creds){return 'Basic '+btoa(`${creds.keyId}:${creds.keySecret}`)}
-async function fetchJson(url,opts={}){const r=await fetch(url,opts);const text=await r.text();if(!r.ok)throw new Error(`${r.status} ${r.statusText}${text?': '+text.slice(0,180):''}`);return text?JSON.parse(text):{};}
+async function fetchWithTimeout(url,opts={},timeoutMs=6000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(url,{...opts,signal:controller.signal,cache:'no-store'});}
+  catch(e){if(e?.name==='AbortError')throw new Error(`Timeout: ${new URL(url).hostname}`);throw e;}
+  finally{clearTimeout(timer);}
+}
+async function fetchJson(url,opts={},timeoutMs=6000){const r=await fetchWithTimeout(url,opts,timeoutMs);const text=await r.text();if(!r.ok)throw new Error(`${r.status} ${r.statusText}${text?': '+text.slice(0,180):''}`);return text?JSON.parse(text):{};}
 async function lunoJson(path,creds){return fetchJson(LUNO+path,{headers:{Authorization:auth(creds),Accept:'application/json'}})}
 
 async function getLunoPortfolio(creds){
@@ -65,21 +72,46 @@ function buildAsset(asset,lunoAsset,balances,trades,currentMYR,fx){
 }
 function tradeViews(asset,trades){return [...trades].sort((a,b)=>b.timestamp-a.timestamp).slice(0,30).map(t=>({asset,side:t.is_buy?'BUY':'SELL',timestamp:t.timestamp,price:n(t.price),volume:n(t.volume),gross:n(t.price)*n(t.volume),fee:n(t.fee_counter)}));}
 
-async function marketSnapshot(symbol){try{return await binanceSnapshot(symbol)}catch(e){console.warn('Binance failed',e);return bybitSnapshot(symbol)}}
+async function marketSnapshot(symbol){
+  const errors=[];
+  try{return await bybitSnapshot(symbol)}catch(e){errors.push('Bybit: '+(e.message||e));console.warn('Bybit failed',e)}
+  try{return await binanceSnapshot(symbol)}catch(e){errors.push('Binance: '+(e.message||e));console.warn('Binance failed',e)}
+  throw new Error('Market API unavailable — '+errors.join(' | '));
+}
 async function binanceSnapshot(symbol){
-  const s=encodeURIComponent(symbol);const [ticker,premium,oi,oiHist,ratio]=await Promise.all([
-    fetchJson(`${BINANCE}/fapi/v1/ticker/24hr?symbol=${s}`),fetchJson(`${BINANCE}/fapi/v1/premiumIndex?symbol=${s}`),fetchJson(`${BINANCE}/fapi/v1/openInterest?symbol=${s}`),fetchJson(`${BINANCE}/futures/data/openInterestHist?symbol=${s}&period=1h&limit=25`),fetchJson(`${BINANCE}/futures/data/globalLongShortAccountRatio?symbol=${s}&period=1h&limit=1`)
-  ]);const first=oiHist[0]?n(oiHist[0].sumOpenInterestValue):0,last=oiHist.at(-1)?n(oiHist.at(-1).sumOpenInterestValue):0,ls=ratio[0];
-  return {symbol,provider:'Binance',price:n(ticker.lastPrice),price24:n(ticker.priceChangePercent),volume:n(ticker.quoteVolume),funding:n(premium.lastFundingRate)*100,oiUSD:last||n(oi.openInterest)*n(ticker.lastPrice),oi24:first&&last?(last-first)/first*100:null,longPct:ls?n(ls.longAccount)*100:null,shortPct:ls?n(ls.shortAccount)*100:null,ratio:ls?n(ls.longShortRatio):null,at:Date.now()};
+  const s=encodeURIComponent(symbol);
+  const [ticker,premium]=await Promise.all([
+    fetchJson(`${BINANCE}/fapi/v1/ticker/24hr?symbol=${s}`,{},5000),
+    fetchJson(`${BINANCE}/fapi/v1/premiumIndex?symbol=${s}`,{},5000)
+  ]);
+  const [oiR,histR,ratioR]=await Promise.allSettled([
+    fetchJson(`${BINANCE}/fapi/v1/openInterest?symbol=${s}`,{},4500),
+    fetchJson(`${BINANCE}/futures/data/openInterestHist?symbol=${s}&period=1h&limit=25`,{},4500),
+    fetchJson(`${BINANCE}/futures/data/globalLongShortAccountRatio?symbol=${s}&period=1h&limit=1`,{},4500)
+  ]);
+  const oi=oiR.status==='fulfilled'?oiR.value:null,oiHist=histR.status==='fulfilled'?histR.value:[],ratio=ratioR.status==='fulfilled'?ratioR.value:[];
+  const first=oiHist[0]?n(oiHist[0].sumOpenInterestValue):0,last=oiHist.at(-1)?n(oiHist.at(-1).sumOpenInterestValue):0,ls=ratio[0],price=n(ticker.lastPrice);
+  return {symbol,provider:'Binance',price,price24:n(ticker.priceChangePercent),volume:n(ticker.quoteVolume),funding:n(premium.lastFundingRate)*100,oiUSD:last||(oi?n(oi.openInterest)*price:null),oi24:first&&last?(last-first)/first*100:null,longPct:ls?n(ls.longAccount)*100:null,shortPct:ls?n(ls.shortAccount)*100:null,ratio:ls?n(ls.longShortRatio):null,at:Date.now()};
 }
 async function bybitSnapshot(symbol){
-  const s=encodeURIComponent(symbol);const [t,o,r]=await Promise.all([fetchJson(`${BYBIT}/v5/market/tickers?category=linear&symbol=${s}`),fetchJson(`${BYBIT}/v5/market/open-interest?category=linear&symbol=${s}&intervalTime=1h&limit=25`),fetchJson(`${BYBIT}/v5/market/account-ratio?category=linear&symbol=${s}&period=1h&limit=1`)]);const x=t.result.list[0],list=o.result.list||[],newest=n(list[0]?.openInterest||x.openInterest),oldest=n(list.at(-1)?.openInterest||newest),p=n(x.lastPrice),ls=r.result.list?.[0];
-  return {symbol,provider:'Bybit',price:p,price24:n(x.price24hPcnt)*100,volume:n(x.turnover24h),funding:n(x.fundingRate)*100,oiUSD:n(x.openInterestValue)||newest*p,oi24:oldest?(newest-oldest)/oldest*100:null,longPct:ls?n(ls.buyRatio)*100:null,shortPct:ls?n(ls.sellRatio)*100:null,ratio:ls&&n(ls.sellRatio)?n(ls.buyRatio)/n(ls.sellRatio):null,at:Date.now()};
+  const s=encodeURIComponent(symbol);
+  const t=await fetchJson(`${BYBIT}/v5/market/tickers?category=linear&symbol=${s}`,{},5000);
+  const x=t?.result?.list?.[0];if(!x)throw new Error('No ticker data');
+  const [oR,rR]=await Promise.allSettled([
+    fetchJson(`${BYBIT}/v5/market/open-interest?category=linear&symbol=${s}&intervalTime=1h&limit=25`,{},4500),
+    fetchJson(`${BYBIT}/v5/market/account-ratio?category=linear&symbol=${s}&period=1h&limit=1`,{},4500)
+  ]);
+  const o=oR.status==='fulfilled'?oR.value:null,r=rR.status==='fulfilled'?rR.value:null,list=o?.result?.list||[],newest=n(list[0]?.openInterest||x.openInterest),oldest=n(list.at(-1)?.openInterest||newest),p=n(x.lastPrice),ls=r?.result?.list?.[0];
+  return {symbol,provider:'Bybit',price:p,price24:n(x.price24hPcnt)*100,volume:n(x.turnover24h),funding:n(x.fundingRate)*100,oiUSD:n(x.openInterestValue)||(newest?newest*p:null),oi24:oldest&&newest?(newest-oldest)/oldest*100:null,longPct:ls?n(ls.buyRatio)*100:null,shortPct:ls?n(ls.sellRatio)*100:null,ratio:ls&&n(ls.sellRatio)?n(ls.buyRatio)/n(ls.sellRatio):null,at:Date.now()};
 }
 async function etfSnapshot(asset){
   const url=asset==='BTC'?'https://farside.co.uk/btc/':'https://farside.co.uk/eth/';
-  let html='';try{const r=await fetch(url);if(r.ok)html=await r.text();}catch{}
-  if(!html){const proxy='https://api.allorigins.win/raw?url='+encodeURIComponent(url);const r=await fetch(proxy);if(!r.ok)throw new Error('ETF public source unavailable');html=await r.text();}
+  let html='';
+  try{const r=await fetchWithTimeout(url,{},3500);if(r.ok)html=await r.text();}catch{}
+  if(!html){
+    try{const proxy='https://api.allorigins.win/raw?url='+encodeURIComponent(url);const r=await fetchWithTimeout(proxy,{},4000);if(r.ok)html=await r.text();}catch{}
+  }
+  if(!html)throw new Error('ETF source unavailable');
   const rows=[];for(const match of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){const cells=[...match[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m=>m[1].replace(/<[^>]+>/g,'').replace(/&nbsp;/gi,' ').replace(/&#8211;|&ndash;/gi,'–').replace(/&amp;/gi,'&').replace(/\s+/g,' ').trim());if(cells.length<2||!/^\d{1,2}\s+[A-Za-z]{3}\s+\d{4}$/.test(cells[0]))continue;const raw=cells.at(-1).replace(/\$/g,'').replace(/,/g,'').trim();if(!raw||raw==='-'||raw==='–'||/pending|n\/a/i.test(raw))continue;const neg=/^\(.*\)$/.test(raw),val=Number(raw.replace(/[()]/g,''));if(Number.isFinite(val))rows.push({date:cells[0],flow:neg?-val:val});}
   const last5=rows.slice(-5);return {asset,latest:rows.at(-1)||null,last5:last5.length?last5.reduce((a,x)=>a+x.flow,0):null,positive:last5.filter(x=>x.flow>0).length,source:'Farside'};
 }
@@ -105,11 +137,41 @@ function analyze(m,etf,liq){
 async function refresh(){
   if(state.loading)return;state.loading=true;$('#refreshBtn').classList.add('loading');render();
   try{
-    const [btcM,ethM,btcE,ethE]=await Promise.all([marketSnapshot('BTCUSDT'),marketSnapshot('ETHUSDT'),etfSnapshot('BTC').catch(()=>null),etfSnapshot('ETH').catch(()=>null)]);
-    let portfolio=null;if(state.demo)portfolio=demoPortfolio(btcM,ethM);else if(state.credentials)portfolio=await getLunoPortfolio(state.credentials);
-    state.data={portfolio,btcM,ethM,btcE,ethE,refreshedAt:Date.now()};saveHistory(state.data);toast('已更新');
-  }catch(e){toast('更新失败');console.error(e);state.data={...(state.data||{}),error:e.message||String(e)};}
-  finally{state.loading=false;$('#refreshBtn').classList.remove('loading');render();}
+    const marketResults=await Promise.allSettled([marketSnapshot('BTCUSDT'),marketSnapshot('ETHUSDT')]);
+    let btcM=marketResults[0].status==='fulfilled'?marketResults[0].value:null;
+    let ethM=marketResults[1].status==='fulfilled'?marketResults[1].value:null;
+    const failed=[];
+    if(!btcM)failed.push('BTC: '+(marketResults[0].reason?.message||'market source failed'));
+    if(!ethM)failed.push('ETH: '+(marketResults[1].reason?.message||'market source failed'));
+    if(state.demo){if(!btcM)btcM=demoMarket('BTC');if(!ethM)ethM=demoMarket('ETH');}
+    if(!btcM||!ethM)throw new Error(failed.join(' | '));
+
+    // Render market data first. ETF and Luno are optional and must never keep the screen spinning.
+    state.data={portfolio:null,btcM,ethM,btcE:null,ethE:null,refreshedAt:Date.now(),error:failed.length?'部分市场 API 无法访问；Demo fallback 已启用。':''};
+    if(state.demo)state.data.portfolio=demoPortfolio(btcM,ethM);
+    render();
+
+    if(state.credentials){
+      try{state.data.portfolio=await getLunoPortfolio(state.credentials);}
+      catch(e){state.data.error=(state.data.error?state.data.error+' ':'')+'Luno 读取失败：'+(e.message||String(e));}
+    }
+    saveHistory(state.data);render();toast('市场已更新');
+
+    // ETF is best-effort and loads after the main screen.
+    Promise.allSettled([etfSnapshot('BTC'),etfSnapshot('ETH')]).then(rs=>{
+      if(!state.data)return;
+      if(rs[0].status==='fulfilled')state.data.btcE=rs[0].value;
+      if(rs[1].status==='fulfilled')state.data.ethE=rs[1].value;
+      render();
+    });
+  }catch(e){
+    console.error(e);toast('市场 API 暂时不可用');
+    state.data=null;
+    content.innerHTML=`<div class="error">读取市场数据失败：${escapeHtml(e.message||String(e))}<br><br>不会再无限转圈。请点右上角 ↻ 重试。</div>`;
+  }finally{state.loading=false;$('#refreshBtn').classList.remove('loading');if(state.data)render();}
+}
+function demoMarket(asset){
+  const btc=asset==='BTC';return {symbol:btc?'BTCUSDT':'ETHUSDT',provider:'Demo fallback',price:btc?85000:2800,price24:btc?1.2:.8,volume:null,funding:.01,oiUSD:btc?28000000000:14000000000,oi24:2.5,longPct:52,shortPct:48,ratio:1.08,at:Date.now()};
 }
 function demoPortfolio(btcM,ethM){
   const btcQty=.03614203,btcAvg=276684,ethQty=2.40963185,ethAvg=8715,fx=3.9;const make=(asset,q,avg,m)=>({asset,total:q,spot:asset==='BTC'?q:0,staking:asset==='ETH'?q:0,other:0,currentUSD:m.price,currentMYR:m.price*fx,avgMYR:avg,avgUSD:avg/fx,trackedCost:q*avg,marketValue:q*m.price*fx,pnl:q*m.price*fx-q*avg,returnPct:(m.price*fx-avg)/avg*100,tradeInventory:q,buys:asset==='BTC'?2:3,sells:0});return {btc:make('BTC',btcQty,btcAvg,btcM),eth:make('ETH',ethQty,ethAvg,ethM),btcTrades:[],ethTrades:[],fx};
