@@ -10,13 +10,13 @@
   <title>Crypto Radar LIVE</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
-  <link rel="stylesheet" href="styles.css?v=1.6.0" />
+  <link rel="stylesheet" href="styles.css?v=1.8.0" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LOCAL · READ ONLY · v1.7</div>
+        <div class="eyebrow">LOCAL · READ ONLY · v1.8</div>
         <h1>Crypto Radar</h1>
       </div>
       <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
@@ -36,13 +36,46 @@
     <div class="eyebrow">LIVE MARKET FIRST</div>
     <h2>先跑真实市场数据</h2>
     <div class="notice warning">
-      这一版暂时不连接 Luno。先确认 BTC / ETH 的真实 Price、24H、Open Interest、Funding、Long/Short、ETF Flow 与 24H Cross-venue Liquidation 在你的 iPhone 能稳定读取。
+      市场 LIVE 层已经完成。进入后可继续连接 Luno Read-only；Luno 只用于读取余额、Staking / Earn 与成交记录，不提供任何交易功能。
     </div>
     <button id="startLiveBtn" class="btn primary full">进入 LIVE 市场</button>
-    <p class="fineprint">不会使用 Demo 市场数字。某个来源失败时会显示“—”或 PARTIAL，不会拿假数据顶替。</p>
+    <p class="fineprint">不会使用 Demo 市场数字。Luno 连接是可选的；不连接也能继续使用完整市场 LIVE 页面。</p>
+  </dialog>
+
+
+
+  <dialog id="lunoDialog" class="modal small">
+    <div class="eyebrow">LUNO · READ ONLY</div>
+    <h2>连接你的 Luno</h2>
+    <div class="notice warning">请在 Luno 网页创建 API Key。最简单选择官方 <b>Read-only access</b>，不要开启交易/发送/提款能力。Key Secret 只会显示一次。</div>
+    <form id="lunoForm">
+      <label>Key ID</label>
+      <input id="lunoKeyId" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Luno Key ID" />
+      <label>Key Secret</label>
+      <input id="lunoKeySecret" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Luno Key Secret" />
+      <label>本机解锁 PIN（保存 Key 时至少 6 位）</label>
+      <input id="lunoPin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="例如 6 位以上 PIN" />
+      <label class="check"><input id="lunoSave" type="checkbox" checked /> 加密保存到这台手机</label>
+      <div id="lunoError" class="error hidden"></div>
+      <button class="btn primary full" type="submit">测试并连接</button>
+      <button id="lunoCancel" class="btn ghost full" type="button" style="margin-top:10px">暂时不连接</button>
+    </form>
+    <p class="fineprint">Secret 不会写进 GitHub，也不会发送给本 App 以外的服务。浏览器只直接请求 Luno API。</p>
+  </dialog>
+
+  <dialog id="unlockDialog" class="modal small">
+    <div class="eyebrow">LOCAL ENCRYPTED KEY</div>
+    <h2>解锁 Luno</h2>
+    <form id="unlockForm">
+      <label>本机 PIN</label>
+      <input id="unlockPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="输入保存 Key 时的 PIN" />
+      <div id="unlockError" class="error hidden"></div>
+      <button class="btn primary full" type="submit">解锁并连接</button>
+      <button id="unlockCancel" class="btn ghost full" type="button" style="margin-top:10px">取消</button>
+    </form>
   </dialog>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app-live17.js?v=1.7.0" defer></script>
+  <script src="app-live18.js?v=1.8.0" defer></script>
 </body>
 </html>
