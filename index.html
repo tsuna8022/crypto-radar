@@ -10,13 +10,13 @@
   <title>Crypto Radar LIVE</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
-  <link rel="stylesheet" href="styles.css?v=1.8.0" />
+  <link rel="stylesheet" href="styles.css?v=1.9.0" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LOCAL · READ ONLY · v1.8</div>
+        <div class="eyebrow">LOCAL · READ ONLY · v1.9</div>
         <h1>Crypto Radar</h1>
       </div>
       <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
@@ -45,37 +45,36 @@
 
 
   <dialog id="lunoDialog" class="modal small">
-    <div class="eyebrow">LUNO · READ ONLY</div>
-    <h2>连接你的 Luno</h2>
-    <div class="notice warning">请在 Luno 网页创建 API Key。最简单选择官方 <b>Read-only access</b>，不要开启交易/发送/提款能力。Key Secret 只会显示一次。</div>
+    <div class="eyebrow">LUNO · ENCRYPTED READ ONLY</div>
+    <h2>连接 Luno 加密快照</h2>
+    <div class="notice warning">Safari 不能直接读取 Luno 私有 API。v1.9 改用 <b>GitHub Actions</b> 在服务器端读取 Read-only Luno，再把资料用 256-bit Sync Key 加密后放回你自己的 GitHub Pages。API Key 不会放进网页。</div>
     <form id="lunoForm">
-      <label>Key ID</label>
-      <input id="lunoKeyId" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Luno Key ID" />
-      <label>Key Secret</label>
-      <input id="lunoKeySecret" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Luno Key Secret" />
-      <label>本机解锁 PIN（保存 Key 时至少 6 位）</label>
+      <label>Sync Key（64 位 HEX）</label>
+      <input id="lunoSyncKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="64 位 Sync Key" />
+      <button id="generateSyncKey" class="btn ghost full" type="button" style="margin-top:8px">生成新的 Sync Key</button>
+      <label>本机解锁 PIN（保存 Sync Key 时至少 6 位）</label>
       <input id="lunoPin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="例如 6 位以上 PIN" />
-      <label class="check"><input id="lunoSave" type="checkbox" checked /> 加密保存到这台手机</label>
+      <label class="check"><input id="lunoSave" type="checkbox" checked /> 加密保存 Sync Key 到这台手机</label>
       <div id="lunoError" class="error hidden"></div>
-      <button class="btn primary full" type="submit">测试并连接</button>
+      <button class="btn primary full" type="submit">读取加密快照</button>
       <button id="lunoCancel" class="btn ghost full" type="button" style="margin-top:10px">暂时不连接</button>
     </form>
-    <p class="fineprint">Secret 不会写进 GitHub，也不会发送给本 App 以外的服务。浏览器只直接请求 Luno API。</p>
+    <p class="fineprint">GitHub repository 仍是公开的，但只会存放 AES-GCM 加密后的 <code>data/luno.enc.json</code>。Luno Key ID、Key Secret 和 Sync Key 都放在 GitHub Secrets；网页只需要 Sync Key 来解密。</p>
   </dialog>
 
   <dialog id="unlockDialog" class="modal small">
     <div class="eyebrow">LOCAL ENCRYPTED KEY</div>
-    <h2>解锁 Luno</h2>
+    <h2>解锁 Luno Sync Key</h2>
     <form id="unlockForm">
       <label>本机 PIN</label>
-      <input id="unlockPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="输入保存 Key 时的 PIN" />
+      <input id="unlockPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="输入保存 Sync Key 时的 PIN" />
       <div id="unlockError" class="error hidden"></div>
-      <button class="btn primary full" type="submit">解锁并连接</button>
+      <button class="btn primary full" type="submit">解锁并读取快照</button>
       <button id="unlockCancel" class="btn ghost full" type="button" style="margin-top:10px">取消</button>
     </form>
   </dialog>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app-live18.js?v=1.8.0" defer></script>
+  <script src="app-live19.js?v=1.9.0" defer></script>
 </body>
 </html>
