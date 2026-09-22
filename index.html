@@ -7,16 +7,16 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Crypto Radar" />
-  <title>Crypto Radar</title>
+  <title>Crypto Radar LIVE</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
-  <link rel="stylesheet" href="styles.css?v=1.1.0" />
+  <link rel="stylesheet" href="styles.css?v=1.3.0" />
 </head>
 <body>
   <div id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LOCAL · READ ONLY</div>
+        <div class="eyebrow">LOCAL · READ ONLY · v1.3</div>
         <h1>Crypto Radar</h1>
       </div>
       <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
@@ -28,43 +28,21 @@
       <button data-tab="home" class="tab active"><span>⌂</span><small>首页</small></button>
       <button data-tab="portfolio" class="tab"><span>◫</span><small>持仓</small></button>
       <button data-tab="market" class="tab"><span>⌁</span><small>市场</small></button>
-      <button data-tab="settings" class="tab"><span>⚙</span><small>设置</small></button>
+      <button data-tab="settings" class="tab"><span>⚙</span><small>状态</small></button>
     </nav>
   </div>
 
-  <dialog id="setupDialog" class="modal">
-    <form method="dialog" id="setupForm">
-      <div class="modal-head">
-        <div>
-          <div class="eyebrow">FIRST SETUP</div>
-          <h2>连接 Luno（只读）</h2>
-        </div>
-      </div>
-      <div class="notice warning"><b>重要：</b>请创建 Custom API Key，只勾 View balance、View transactions、View orders。权限值合计 35。不要给 Send / Create orders / Withdraw 权限。</div>
-      <label>Key ID<input id="keyId" autocomplete="off" autocapitalize="none" spellcheck="false" required /></label>
-      <label>Key Secret<input id="keySecret" type="password" autocomplete="new-password" required /></label>
-      <label>本机解锁 PIN（至少 6 位）<input id="pin" type="password" inputmode="numeric" minlength="6" autocomplete="new-password" required /></label>
-      <label class="check"><input id="saveKey" type="checkbox" checked /> 加密保存到这台设备</label>
-      <div id="setupError" class="error hidden"></div>
-      <div class="actions">
-        <button type="button" id="demoBtn" class="btn ghost">先看 Demo</button>
-        <button type="submit" class="btn primary">测试并连接</button>
-      </div>
-      <p class="fineprint">App 没有任何下单、转币或提款代码。API secret 不会发送给本 App 以外的服务；它只用于直接请求 Luno。</p>
-    </form>
-  </dialog>
-
-  <dialog id="unlockDialog" class="modal small">
-    <form method="dialog" id="unlockForm">
-      <div class="eyebrow">LOCAL LOCK</div><h2>解锁 Crypto Radar</h2>
-      <label>PIN<input id="unlockPin" type="password" inputmode="numeric" autocomplete="current-password" required /></label>
-      <div id="unlockError" class="error hidden"></div>
-      <div class="actions"><button type="submit" class="btn primary full">解锁</button></div>
-      <button type="button" id="resetLocalBtn" class="text-btn danger">忘记 PIN？清除本机 Key</button>
-    </form>
+  <dialog id="startDialog" class="modal small">
+    <div class="eyebrow">LIVE MARKET FIRST</div>
+    <h2>先跑真实市场数据</h2>
+    <div class="notice warning">
+      这一版暂时不连接 Luno。先确认 BTC / ETH 的真实 Price、24H、Open Interest、Funding 在你的 iPhone 能稳定读取。
+    </div>
+    <button id="startLiveBtn" class="btn primary full">进入 LIVE 市场</button>
+    <p class="fineprint">不会使用 Demo 市场数字。某个来源失败时会显示“—”或 PARTIAL，不会拿假数据顶替。</p>
   </dialog>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app.js?v=1.1.0" defer></script>
+  <script src="app-live13.js?v=1.3.0" defer></script>
 </body>
 </html>
