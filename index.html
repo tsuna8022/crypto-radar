@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#07111f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Crypto Radar" />
+  <title>Crypto Radar</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">LOCAL · READ ONLY</div>
+        <h1>Crypto Radar</h1>
+      </div>
+      <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
+    </header>
+
+    <main id="content" class="content"></main>
+
+    <nav class="tabs" aria-label="Main navigation">
+      <button data-tab="home" class="tab active"><span>⌂</span><small>首页</small></button>
+      <button data-tab="portfolio" class="tab"><span>◫</span><small>持仓</small></button>
+      <button data-tab="market" class="tab"><span>⌁</span><small>市场</small></button>
+      <button data-tab="settings" class="tab"><span>⚙</span><small>设置</small></button>
+    </nav>
+  </div>
+
+  <dialog id="setupDialog" class="modal">
+    <form method="dialog" id="setupForm">
+      <div class="modal-head">
+        <div>
+          <div class="eyebrow">FIRST SETUP</div>
+          <h2>连接 Luno（只读）</h2>
+        </div>
+      </div>
+      <div class="notice warning"><b>重要：</b>请创建 Custom API Key，只勾 View balance、View transactions、View orders。权限值合计 35。不要给 Send / Create orders / Withdraw 权限。</div>
+      <label>Key ID<input id="keyId" autocomplete="off" autocapitalize="none" spellcheck="false" required /></label>
+      <label>Key Secret<input id="keySecret" type="password" autocomplete="new-password" required /></label>
+      <label>本机解锁 PIN（至少 6 位）<input id="pin" type="password" inputmode="numeric" minlength="6" autocomplete="new-password" required /></label>
+      <label class="check"><input id="saveKey" type="checkbox" checked /> 加密保存到这台设备</label>
+      <div id="setupError" class="error hidden"></div>
+      <div class="actions">
+        <button type="button" id="demoBtn" class="btn ghost">先看 Demo</button>
+        <button type="submit" class="btn primary">测试并连接</button>
+      </div>
+      <p class="fineprint">App 没有任何下单、转币或提款代码。API secret 不会发送给本 App 以外的服务；它只用于直接请求 Luno。</p>
+    </form>
+  </dialog>
+
+  <dialog id="unlockDialog" class="modal small">
+    <form method="dialog" id="unlockForm">
+      <div class="eyebrow">LOCAL LOCK</div><h2>解锁 Crypto Radar</h2>
+      <label>PIN<input id="unlockPin" type="password" inputmode="numeric" autocomplete="current-password" required /></label>
+      <div id="unlockError" class="error hidden"></div>
+      <div class="actions"><button type="submit" class="btn primary full">解锁</button></div>
+      <button type="button" id="resetLocalBtn" class="text-btn danger">忘记 PIN？清除本机 Key</button>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js" defer></script>
+</body>
+</html>
