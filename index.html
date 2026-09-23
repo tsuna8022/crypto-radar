@@ -16,7 +16,7 @@
   <div id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LOCAL · READ ONLY · v1.9</div>
+        <div class="eyebrow">LOCAL · READ ONLY · v1.9.1</div>
         <h1>Crypto Radar</h1>
       </div>
       <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
@@ -47,11 +47,13 @@
   <dialog id="lunoDialog" class="modal small">
     <div class="eyebrow">LUNO · ENCRYPTED READ ONLY</div>
     <h2>连接 Luno 加密快照</h2>
-    <div class="notice warning">Safari 不能直接读取 Luno 私有 API。v1.9 改用 <b>GitHub Actions</b> 在服务器端读取 Read-only Luno，再把资料用 256-bit Sync Key 加密后放回你自己的 GitHub Pages。API Key 不会放进网页。</div>
+    <div class="notice warning">Safari 不能直接读取 Luno 私有 API。v1.9.1 改用 <b>GitHub Actions</b> 在服务器端读取 Read-only Luno，再把资料用 256-bit Sync Key 加密后放回你自己的 GitHub Pages。API Key 不会放进网页。</div>
     <form id="lunoForm">
       <label>Sync Key（64 位 HEX）</label>
       <input id="lunoSyncKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="64 位 Sync Key" />
       <button id="generateSyncKey" class="btn ghost full" type="button" style="margin-top:8px">生成新的 Sync Key</button>
+      <button id="copySyncKey" class="btn ghost full" type="button" style="margin-top:8px">复制 Sync Key（不显示）</button>
+      <button id="toggleSyncKey" class="btn ghost full" type="button" style="margin-top:8px">显示 Sync Key</button>
       <label>本机解锁 PIN（保存 Sync Key 时至少 6 位）</label>
       <input id="lunoPin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="例如 6 位以上 PIN" />
       <label class="check"><input id="lunoSave" type="checkbox" checked /> 加密保存 Sync Key 到这台手机</label>
@@ -75,6 +77,6 @@
   </dialog>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app-live19.js?v=1.9.0" defer></script>
+  <script src="app-live191.js?v=1.9.1" defer></script>
 </body>
 </html>
