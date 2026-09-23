@@ -1,0 +1,153 @@
+name: Luno Read-only Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: luno-readonly-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install crypto helper
+        run: python -m pip install --disable-pip-version-check cryptography
+
+      - name: Fetch Luno read-only data and encrypt snapshot
+        env:
+          LUNO_KEY_ID: ${{ secrets.LUNO_KEY_ID }}
+          LUNO_KEY_SECRET: ${{ secrets.LUNO_KEY_SECRET }}
+          CRYPTO_RADAR_SYNC_KEY: ${{ secrets.CRYPTO_RADAR_SYNC_KEY }}
+        run: |
+          python - <<'PY'
+          import os, json, base64, urllib.request, datetime, pathlib
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+          key_id = os.environ.get('LUNO_KEY_ID','').strip()
+          key_secret = os.environ.get('LUNO_KEY_SECRET','').strip()
+          sync_hex = os.environ.get('CRYPTO_RADAR_SYNC_KEY','').strip()
+
+          if not key_id or not key_secret:
+              raise SystemExit('Missing LUNO_KEY_ID or LUNO_KEY_SECRET repository secret')
+
+          if len(sync_hex) != 64:
+              raise SystemExit('CRYPTO_RADAR_SYNC_KEY must be exactly 64 hex characters')
+
+          try:
+              sync_key = bytes.fromhex(sync_hex)
+          except ValueError:
+              raise SystemExit('CRYPTO_RADAR_SYNC_KEY must be valid hex')
+
+          auth = base64.b64encode(f'{key_id}:{key_secret}'.encode()).decode()
+
+          def get(path, private=True):
+              req = urllib.request.Request('https://api.luno.com' + path)
+              req.add_header('Accept', 'application/json')
+              req.add_header('User-Agent', 'CryptoRadar-ReadOnly-Sync/1.0')
+              if private:
+                  req.add_header('Authorization', 'Basic ' + auth)
+
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  return json.loads(r.read().decode())
+
+          warnings = []
+
+          balances = get('/api/1/balance', True).get('balance', [])
+
+          try:
+              btc_trades = get(
+                  '/api/1/listtrades?pair=XBTMYR&limit=1000&sort_desc=false',
+                  True
+              ).get('trades', [])
+          except Exception:
+              btc_trades = []
+              warnings.append('BTC trade history unavailable')
+
+          try:
+              eth_trades = get(
+                  '/api/1/listtrades?pair=ETHMYR&limit=1000&sort_desc=false',
+                  True
+              ).get('trades', [])
+          except Exception:
+              eth_trades = []
+              warnings.append('ETH trade history unavailable')
+
+          try:
+              btc_myr = get('/api/1/ticker?pair=XBTMYR', False).get('last_trade')
+          except Exception:
+              btc_myr = None
+              warnings.append('XBTMYR ticker unavailable')
+
+          try:
+              eth_myr = get('/api/1/ticker?pair=ETHMYR', False).get('last_trade')
+          except Exception:
+              eth_myr = None
+              warnings.append('ETHMYR ticker unavailable')
+
+          payload = {
+              'schema': 'crypto-radar-luno-snapshot-v1',
+              'generatedAt': datetime.datetime.now(
+                  datetime.timezone.utc
+              ).isoformat(),
+              'balances': balances,
+              'btcTrades': btc_trades,
+              'ethTrades': eth_trades,
+              'btcMYR': btc_myr,
+              'ethMYR': eth_myr,
+              'warnings': warnings,
+          }
+
+          plain = json.dumps(
+              payload,
+              separators=(',', ':'),
+              ensure_ascii=False
+          ).encode()
+
+          iv = os.urandom(12)
+          aad = b'crypto-radar-luno-v1'
+
+          ct = AESGCM(sync_key).encrypt(iv, plain, aad)
+
+          out = {
+              'v': 1,
+              'alg': 'AES-256-GCM',
+              'iv': base64.b64encode(iv).decode(),
+              'ct': base64.b64encode(ct).decode(),
+              'updatedAt': payload['generatedAt'],
+          }
+
+          pathlib.Path('data').mkdir(exist_ok=True)
+
+          pathlib.Path('data/luno.enc.json').write_text(
+              json.dumps(out, separators=(',', ':'))
+          )
+
+          print('Encrypted Luno snapshot created successfully')
+          PY
+
+      - name: Commit encrypted snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/luno.enc.json
+
+          if git diff --cached --quiet; then
+            echo "No snapshot change"
+          else
+            git commit -m "chore: update encrypted Luno snapshot"
+            git push
+          fi
