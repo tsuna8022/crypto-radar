@@ -3,10 +3,14 @@ name: Luno Read-only Sync
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: '17 */6 * * *'
 
 permissions:
   contents: write
+
+concurrency:
+  group: luno-readonly-sync
+  cancel-in-progress: true
 
 jobs:
   sync:
@@ -14,21 +18,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: '3.13'
 
       - name: Install crypto helper
-        run: pip install cryptography
+        run: python -m pip install --disable-pip-version-check cryptography
 
-      - name: Fetch Luno account history and encrypt snapshot
+      - name: Fetch Luno read-only data and encrypt snapshot
         env:
           LUNO_KEY_ID: ${{ secrets.LUNO_KEY_ID }}
           LUNO_KEY_SECRET: ${{ secrets.LUNO_KEY_SECRET }}
           CRYPTO_RADAR_SYNC_KEY: ${{ secrets.CRYPTO_RADAR_SYNC_KEY }}
+
         run: |
           python - <<'PY'
           import os
@@ -38,8 +43,14 @@ jobs:
           import urllib.parse
           import datetime
           import pathlib
-          from decimal import Decimal, InvalidOperation
+          import time
+
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+          # ============================================================
+          # BASIC CONFIG
+          # ============================================================
 
           BASE = "https://api.luno.com"
 
@@ -47,412 +58,492 @@ jobs:
           key_secret = os.environ.get("LUNO_KEY_SECRET", "").strip()
           sync_hex = os.environ.get("CRYPTO_RADAR_SYNC_KEY", "").strip()
 
+
+          # ============================================================
+          # VALIDATE SECRETS
+          # ============================================================
+
           if not key_id:
-              raise RuntimeError("Missing LUNO_KEY_ID")
+              raise SystemExit("Missing LUNO_KEY_ID repository secret")
 
           if not key_secret:
-              raise RuntimeError("Missing LUNO_KEY_SECRET")
+              raise SystemExit("Missing LUNO_KEY_SECRET repository secret")
 
-          if not sync_hex:
-              raise RuntimeError("Missing CRYPTO_RADAR_SYNC_KEY")
+          if len(sync_hex) != 64:
+              raise SystemExit(
+                  "CRYPTO_RADAR_SYNC_KEY must be exactly 64 HEX characters"
+              )
 
           try:
               sync_key = bytes.fromhex(sync_hex)
-          except Exception:
-              raise RuntimeError(
-                  "CRYPTO_RADAR_SYNC_KEY must be a 64-character HEX key"
+          except ValueError:
+              raise SystemExit(
+                  "CRYPTO_RADAR_SYNC_KEY must contain HEX characters only"
               )
 
-          if len(sync_key) != 32:
-              raise RuntimeError(
-                  "CRYPTO_RADAR_SYNC_KEY must decode to exactly 32 bytes"
-              )
+
+          # ============================================================
+          # LUNO AUTH
+          # ============================================================
 
           auth = base64.b64encode(
-              f"{key_id}:{key_secret}".encode()
-          ).decode()
+              f"{key_id}:{key_secret}".encode("utf-8")
+          ).decode("ascii")
 
-          def get(path, authenticated=True):
-              req = urllib.request.Request(
-                  BASE + path,
-                  headers={
-                      "Accept": "application/json",
-                      "User-Agent": "CryptoRadar-LunoSync/2.1",
-                      **(
-                          {"Authorization": "Basic " + auth}
-                          if authenticated
-                          else {}
-                      ),
-                  },
+
+          # ============================================================
+          # HTTP GET HELPER
+          # ============================================================
+
+          def get(path, private=True, retries=2):
+              url = BASE + path
+
+              headers = {
+                  "Accept": "application/json",
+                  "User-Agent": "CryptoRadar-ReadOnly-Sync/2.1",
+              }
+
+              if private:
+                  headers["Authorization"] = "Basic " + auth
+
+              last_error = None
+
+              for attempt in range(retries + 1):
+                  try:
+                      request = urllib.request.Request(
+                          url,
+                          headers=headers,
+                          method="GET",
+                      )
+
+                      with urllib.request.urlopen(
+                          request,
+                          timeout=25,
+                      ) as response:
+                          return json.loads(
+                              response.read().decode("utf-8")
+                          )
+
+                  except Exception as exc:
+                      last_error = exc
+
+                      if attempt < retries:
+                          time.sleep(1.5 * (attempt + 1))
+
+              raise last_error
+
+
+          # ============================================================
+          # FETCH ALL TRANSACTIONS FROM ONE LUNO ACCOUNT
+          # ============================================================
+
+          def fetch_account_transactions(account_id):
+
+              encoded_id = urllib.parse.quote(str(account_id))
+
+              # First get latest 1000 rows
+              response = get(
+                  f"/api/1/accounts/{encoded_id}/transactions"
+                  "?min_row=-1000&max_row=0",
+                  True,
               )
 
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  return json.loads(r.read().decode())
+              transactions = list(
+                  response.get("transactions", [])
+              )
 
-          def dec(v):
-              try:
-                  return Decimal(str(v))
-              except (InvalidOperation, TypeError, ValueError):
-                  return Decimal("0")
+              # Keep track so duplicated rows are not added
+              seen_rows = set()
 
-          # ------------------------------------------------------------
-          # 1. Read ALL Luno balances/accounts
-          # ------------------------------------------------------------
+              for tx in transactions:
+                  row = tx.get("row_index")
+                  if row is not None:
+                      seen_rows.add(str(row))
 
-          balance_payload = get("/api/1/balance", True)
-          balances = balance_payload.get("balance", [])
+              # --------------------------------------------------------
+              # If account has >1000 rows, walk backwards
+              # Maximum 20,000 rows for safety
+              # --------------------------------------------------------
 
-          wanted_accounts = []
+              while transactions and len(transactions) < 20000:
+
+                  row_numbers = []
+
+                  for tx in transactions:
+                      row = tx.get("row_index")
+
+                      try:
+                          row_numbers.append(int(row))
+                      except (TypeError, ValueError):
+                          pass
+
+                  if not row_numbers:
+                      break
+
+                  oldest_row = min(row_numbers)
+
+                  if oldest_row <= 1:
+                      break
+
+                  next_max = oldest_row
+                  next_min = max(1, next_max - 1000)
+
+                  older_response = get(
+                      f"/api/1/accounts/{encoded_id}/transactions"
+                      f"?min_row={next_min}"
+                      f"&max_row={next_max}",
+                      True,
+                  )
+
+                  older_transactions = older_response.get(
+                      "transactions",
+                      [],
+                  )
+
+                  added = 0
+
+                  for tx in older_transactions:
+                      row = tx.get("row_index")
+                      row_key = str(row)
+
+                      if row_key not in seen_rows:
+                          seen_rows.add(row_key)
+                          transactions.append(tx)
+                          added += 1
+
+                  if added == 0:
+                      break
+
+              # Oldest -> newest
+              transactions.sort(
+                  key=lambda tx: (
+                      int(tx.get("timestamp", 0) or 0),
+                      int(tx.get("row_index", 0) or 0),
+                  )
+              )
+
+              return transactions
+
+
+          # ============================================================
+          # START FETCHING DATA
+          # ============================================================
+
+          warnings = []
+
+
+          # ============================================================
+          # 1. BALANCES
+          # ============================================================
+
+          balance_response = get(
+              "/api/1/balance",
+              True,
+          )
+
+          balances = balance_response.get(
+              "balance",
+              [],
+          )
+
+
+          # ============================================================
+          # 2. ACCOUNT TRANSACTION HISTORY
+          #
+          # Read:
+          # - XBT / BTC accounts
+          # - ETH normal wallet
+          # - ETH staking wallet
+          # - MYR wallet
+          #
+          # We save RAW transaction history.
+          # We DO NOT guess cost basis here.
+          # ============================================================
+
+          account_transactions = []
+
+          supported_assets = {
+              "XBT",
+              "BTC",
+              "ETH",
+              "MYR",
+          }
 
           for account in balances:
-              asset = str(account.get("asset", "")).upper()
 
-              if asset not in ("XBT", "BTC", "ETH"):
+              asset = str(
+                  account.get("asset") or ""
+              ).upper()
+
+              if asset not in supported_assets:
                   continue
 
-              account_id = str(account.get("account_id", "")).strip()
+              account_id = account.get("account_id")
 
               if not account_id:
                   continue
 
-              wanted_accounts.append({
-                  "account_id": account_id,
-                  "asset": "XBT" if asset == "BTC" else asset,
-                  "account_type": account.get("account_type"),
-                  "balance": account.get("balance"),
-                  "reserved": account.get("reserved"),
-                  "unconfirmed": account.get("unconfirmed"),
-                  "name": account.get("name"),
-              })
-
-          print("Relevant Luno accounts:", len(wanted_accounts))
-
-          for a in wanted_accounts:
-              print(
-                  "Account",
-                  a["account_id"],
-                  a["asset"],
-                  a.get("account_type"),
-                  a.get("balance"),
-              )
-
-          # ------------------------------------------------------------
-          # 2. Read transaction history for every BTC / ETH account
-          # ------------------------------------------------------------
-
-          def fetch_account_transactions(account_id):
-              all_rows = []
-
-              # First get up to 1000 newest rows.
-              path = (
-                  f"/api/1/accounts/{account_id}/transactions"
-                  "?min_row=-1000&max_row=0"
-              )
-
-              data = get(path, True)
-              rows = data.get("transactions", []) or []
-
-              all_rows.extend(rows)
-
-              # If exactly 1000 returned, continue backwards.
-              while len(rows) >= 1000:
-                  indexes = []
-
-                  for row in rows:
-                      try:
-                          indexes.append(int(row.get("row_index")))
-                      except Exception:
-                          pass
-
-                  if not indexes:
-                      break
-
-                  oldest = min(indexes)
-
-                  if oldest <= 1:
-                      break
-
-                  max_row = oldest
-                  min_row = max(1, max_row - 1000)
-
-                  path = (
-                      f"/api/1/accounts/{account_id}/transactions"
-                      f"?min_row={min_row}&max_row={max_row}"
-                  )
-
-                  data = get(path, True)
-                  rows = data.get("transactions", []) or []
-
-                  if not rows:
-                      break
-
-                  all_rows.extend(rows)
-
-              # Deduplicate using row_index.
-              unique = {}
-
-              for row in all_rows:
-                  idx = str(row.get("row_index", ""))
-
-                  if idx:
-                      unique[idx] = row
-
-              result = list(unique.values())
-
-              result.sort(
-                  key=lambda x: int(x.get("row_index", 0))
-              )
-
-              return result
-
-          accounts_with_transactions = []
-
-          for account in wanted_accounts:
-              aid = account["account_id"]
-
               try:
-                  txs = fetch_account_transactions(aid)
+                  transactions = fetch_account_transactions(
+                      account_id
+                  )
+
+                  account_transactions.append({
+                      "accountId": str(account_id),
+                      "asset": asset,
+                      "accountType": account.get("account_type"),
+                      "name": account.get("name"),
+                      "transactions": transactions,
+                  })
+
                   print(
-                      "Transactions:",
-                      account["asset"],
-                      account.get("account_type"),
-                      aid,
-                      len(txs),
-                  )
-              except Exception as e:
-                  print(
-                      "Transaction read failed:",
-                      aid,
-                      repr(e),
-                  )
-                  txs = []
-
-              item = dict(account)
-              item["transactions"] = txs
-              accounts_with_transactions.append(item)
-
-          # ------------------------------------------------------------
-          # 3. Convert Luno account trade entries into normalized trades
-          #
-          # Existing Crypto Radar expects:
-          # is_buy / price / volume / timestamp
-          # ------------------------------------------------------------
-
-          def normalise_trade(asset, tx):
-              details = tx.get("detail_fields") or {}
-              trade = details.get("trade_details") or {}
-
-              if not trade:
-                  return None
-
-              pair = str(trade.get("pair", "")).upper()
-
-              # Malaysia MYR pairs only for current Crypto Radar.
-              allowed_pairs = (
-                  ("XBTMYR", "BTCMYR")
-                  if asset == "XBT"
-                  else ("ETHMYR",)
-              )
-
-              if pair not in allowed_pairs:
-                  return None
-
-              price = dec(trade.get("price"))
-              volume = abs(dec(trade.get("volume")))
-
-              # Prefer actual asset account balance movement.
-              delta = dec(tx.get("balance_delta"))
-
-              if volume <= 0 and delta != 0:
-                  volume = abs(delta)
-
-              if price <= 0 or volume <= 0:
-                  return None
-
-              # Crypto asset entering wallet = BUY.
-              # Crypto asset leaving wallet through a trade = SELL.
-              is_buy = delta > 0
-
-              return {
-                  "is_buy": bool(is_buy),
-                  "price": str(price),
-                  "volume": str(volume),
-                  "timestamp": int(tx.get("timestamp") or 0),
-                  "pair": pair,
-                  "source": "account_transaction",
-                  "account_id": str(tx.get("account_id", "")),
-                  "row_index": tx.get("row_index"),
-                  "kind": tx.get("kind"),
-                  "description": tx.get("description"),
-                  "balance_delta": str(tx.get("balance_delta", "0")),
-              }
-
-          btc_trades = []
-          eth_trades = []
-
-          for account in accounts_with_transactions:
-              asset = account["asset"]
-
-              for tx in account["transactions"]:
-                  t = normalise_trade(asset, tx)
-
-                  if not t:
-                      continue
-
-                  if asset == "XBT":
-                      btc_trades.append(t)
-
-                  elif asset == "ETH":
-                      eth_trades.append(t)
-
-          def dedupe_trades(rows):
-              seen = set()
-              result = []
-
-              for t in rows:
-                  k = (
-                      t.get("account_id"),
-                      t.get("row_index"),
-                      t.get("timestamp"),
-                      t.get("price"),
-                      t.get("volume"),
-                      t.get("is_buy"),
+                      f"{asset} account "
+                      f"{account_id}: "
+                      f"{len(transactions)} transaction rows"
                   )
 
-                  if k in seen:
-                      continue
+              except Exception as exc:
 
-                  seen.add(k)
-                  result.append(t)
+                  warnings.append(
+                      f"{asset} account {account_id} "
+                      f"transaction history unavailable: "
+                      f"{type(exc).__name__}: {exc}"
+                  )
 
-              result.sort(
-                  key=lambda x: int(x.get("timestamp") or 0)
-              )
+                  account_transactions.append({
+                      "accountId": str(account_id),
+                      "asset": asset,
+                      "accountType": account.get("account_type"),
+                      "name": account.get("name"),
+                      "transactions": [],
+                      "error": f"{type(exc).__name__}: {exc}",
+                  })
 
-              return result
 
-          btc_trades = dedupe_trades(btc_trades)
-          eth_trades = dedupe_trades(eth_trades)
-
-          print("BTC trade records found:", len(btc_trades))
-          print("ETH trade records found:", len(eth_trades))
-
-          # ------------------------------------------------------------
-          # 4. Public MYR ticker snapshot
-          # ------------------------------------------------------------
-
-          warnings = []
+          # ============================================================
+          # 3. LUNO CURRENT BTC/MYR PRICE
+          # ============================================================
 
           try:
-              btc_myr = get(
+              btc_ticker = get(
                   "/api/1/ticker?pair=XBTMYR",
                   False,
-              ).get("last_trade")
-          except Exception as e:
-              btc_myr = None
-              warnings.append(
-                  "XBTMYR ticker unavailable: " + repr(e)
               )
+
+              btc_myr = btc_ticker.get("last_trade")
+
+          except Exception as exc:
+              btc_myr = None
+
+              warnings.append(
+                  "XBTMYR ticker unavailable: "
+                  f"{type(exc).__name__}: {exc}"
+              )
+
+
+          # ============================================================
+          # 4. LUNO CURRENT ETH/MYR PRICE
+          # ============================================================
 
           try:
-              eth_myr = get(
+              eth_ticker = get(
                   "/api/1/ticker?pair=ETHMYR",
                   False,
-              ).get("last_trade")
-          except Exception as e:
-              eth_myr = None
-              warnings.append(
-                  "ETHMYR ticker unavailable: " + repr(e)
               )
 
-          # ------------------------------------------------------------
-          # 5. Build encrypted snapshot
-          # ------------------------------------------------------------
+              eth_myr = eth_ticker.get("last_trade")
 
-          generated_at = datetime.datetime.now(
-              datetime.timezone.utc
-          ).isoformat()
+          except Exception as exc:
+              eth_myr = None
+
+              warnings.append(
+                  "ETHMYR ticker unavailable: "
+                  f"{type(exc).__name__}: {exc}"
+              )
+
+
+          # ============================================================
+          # 5. SAFE DIAGNOSTIC
+          #
+          # Only print counts.
+          # NEVER print transaction contents / secrets.
+          # ============================================================
+
+          print("")
+          print("===== CRYPTO RADAR LUNO SYNC =====")
+          print(f"Balance accounts: {len(balances)}")
+
+          total_transaction_rows = 0
+
+          for item in account_transactions:
+
+              rows = len(
+                  item.get("transactions", [])
+              )
+
+              total_transaction_rows += rows
+
+              print(
+                  f"{item.get('asset')} | "
+                  f"{item.get('accountType')} | "
+                  f"rows={rows}"
+              )
+
+          print(
+              f"Total account transaction rows: "
+              f"{total_transaction_rows}"
+          )
+
+          print(
+              f"BTC/MYR ticker: "
+              f"{'OK' if btc_myr else 'Unavailable'}"
+          )
+
+          print(
+              f"ETH/MYR ticker: "
+              f"{'OK' if eth_myr else 'Unavailable'}"
+          )
+
+          if warnings:
+              print("Warnings:")
+
+              for warning in warnings:
+                  print(" - " + warning)
+
+          print("==================================")
+          print("")
+
+
+          # ============================================================
+          # 6. CREATE SNAPSHOT
+          # ============================================================
+
+          generated_at = (
+              datetime.datetime.now(
+                  datetime.timezone.utc
+              ).isoformat()
+          )
 
           payload = {
               "schema": "crypto-radar-luno-snapshot-v2",
+
               "generatedAt": generated_at,
 
-              # Keep old fields so current v2.0 App can still read them.
+              # Actual Luno balances
               "balances": balances,
-              "btcTrades": btc_trades,
-              "ethTrades": eth_trades,
+
+              # Full account transaction ledger
+              "accountTransactions": account_transactions,
+
+              # Keep old fields so old frontend will not crash.
+              # v2.1 frontend will use accountTransactions instead.
+              "btcTrades": [],
+              "ethTrades": [],
+
+              # Current MYR prices
               "btcMYR": btc_myr,
               "ethMYR": eth_myr,
 
-              # New v2.1 fields.
-              "accounts": accounts_with_transactions,
-              "historySource": "account_transactions",
-              "tradeCounts": {
-                  "btc": len(btc_trades),
-                  "eth": len(eth_trades),
-              },
               "warnings": warnings,
           }
+
+
+          # ============================================================
+          # 7. CONVERT SNAPSHOT TO JSON
+          # ============================================================
 
           plain = json.dumps(
               payload,
               separators=(",", ":"),
               ensure_ascii=False,
-          ).encode()
+          ).encode("utf-8")
+
+
+          # ============================================================
+          # 8. AES-256-GCM ENCRYPTION
+          #
+          # IMPORTANT:
+          # Keep this AAD unchanged because your existing webpage
+          # decryptor already uses crypto-radar-luno-v1.
+          # ============================================================
 
           iv = os.urandom(12)
+
           aad = b"crypto-radar-luno-v1"
 
-          ct = AESGCM(sync_key).encrypt(
+          ciphertext = AESGCM(
+              sync_key
+          ).encrypt(
               iv,
               plain,
               aad,
           )
 
-          out = {
+
+          # ============================================================
+          # 9. ENCRYPTED FILE
+          # ============================================================
+
+          encrypted_output = {
               "v": 1,
               "alg": "AES-256-GCM",
-              "iv": base64.b64encode(iv).decode(),
-              "ct": base64.b64encode(ct).decode(),
+
+              "iv": base64.b64encode(
+                  iv
+              ).decode("ascii"),
+
+              "ct": base64.b64encode(
+                  ciphertext
+              ).decode("ascii"),
+
               "updatedAt": generated_at,
           }
 
-          pathlib.Path("data").mkdir(exist_ok=True)
+
+          # ============================================================
+          # 10. SAVE
+          # ============================================================
+
+          pathlib.Path(
+              "data"
+          ).mkdir(
+              exist_ok=True
+          )
 
           pathlib.Path(
               "data/luno.enc.json"
           ).write_text(
               json.dumps(
-                  out,
+                  encrypted_output,
                   separators=(",", ":"),
               ),
               encoding="utf-8",
           )
 
-          print("Encrypted Luno snapshot created successfully")
-          print("BTC trades:", len(btc_trades))
-          print("ETH trades:", len(eth_trades))
 
-          if warnings:
-              print("Warnings:")
-              for w in warnings:
-                  print("-", w)
+          print(
+              "Encrypted Luno snapshot v2 "
+              "created successfully"
+          )
+
           PY
+
+
+      # ==============================================================
+      # COMMIT ENCRYPTED SNAPSHOT BACK TO GITHUB
+      # ==============================================================
 
       - name: Commit encrypted snapshot
         run: |
-          git config user.name "crypto-radar-bot"
-          git config user.email "crypto-radar-bot@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data/luno.enc.json
 
           if git diff --cached --quiet; then
-            echo "No snapshot change"
+            echo "No snapshot change to commit."
             exit 0
           fi
 
-          git commit -m "Update encrypted Luno snapshot"
-
-          git pull --rebase origin main
-
-          git push origin main
+          git commit -m "chore: update encrypted Luno snapshot"
+          git push
