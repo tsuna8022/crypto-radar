@@ -2,6 +2,8 @@ name: Luno Read-only Sync
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
@@ -20,14 +22,13 @@ jobs:
           python-version: "3.13"
 
       - name: Install crypto helper
-        run: python -m pip install --upgrade cryptography
+        run: pip install cryptography
 
-      - name: Fetch Luno read-only data and encrypt snapshot
+      - name: Fetch Luno account history and encrypt snapshot
         env:
           LUNO_KEY_ID: ${{ secrets.LUNO_KEY_ID }}
           LUNO_KEY_SECRET: ${{ secrets.LUNO_KEY_SECRET }}
           CRYPTO_RADAR_SYNC_KEY: ${{ secrets.CRYPTO_RADAR_SYNC_KEY }}
-
         run: |
           python - <<'PY'
           import os
@@ -37,8 +38,6 @@ jobs:
           import urllib.parse
           import datetime
           import pathlib
-          import time
-
           from decimal import Decimal, InvalidOperation
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -48,855 +47,363 @@ jobs:
           key_secret = os.environ.get("LUNO_KEY_SECRET", "").strip()
           sync_hex = os.environ.get("CRYPTO_RADAR_SYNC_KEY", "").strip()
 
-          if not key_id or not key_secret:
-              raise SystemExit("Missing LUNO_KEY_ID or LUNO_KEY_SECRET")
+          if not key_id:
+              raise RuntimeError("Missing LUNO_KEY_ID")
 
-          if len(sync_hex) != 64:
-              raise SystemExit(
-                  "CRYPTO_RADAR_SYNC_KEY must be exactly 64 HEX characters"
-              )
+          if not key_secret:
+              raise RuntimeError("Missing LUNO_KEY_SECRET")
+
+          if not sync_hex:
+              raise RuntimeError("Missing CRYPTO_RADAR_SYNC_KEY")
 
           try:
               sync_key = bytes.fromhex(sync_hex)
-          except ValueError:
-              raise SystemExit(
-                  "CRYPTO_RADAR_SYNC_KEY must contain HEX characters only"
+          except Exception:
+              raise RuntimeError(
+                  "CRYPTO_RADAR_SYNC_KEY must be a 64-character HEX key"
+              )
+
+          if len(sync_key) != 32:
+              raise RuntimeError(
+                  "CRYPTO_RADAR_SYNC_KEY must decode to exactly 32 bytes"
               )
 
           auth = base64.b64encode(
               f"{key_id}:{key_secret}".encode()
           ).decode()
 
-          def get(path, auth_required=True, retries=2):
-              url = BASE + path
+          def get(path, authenticated=True):
+              req = urllib.request.Request(
+                  BASE + path,
+                  headers={
+                      "Accept": "application/json",
+                      "User-Agent": "CryptoRadar-LunoSync/2.1",
+                      **(
+                          {"Authorization": "Basic " + auth}
+                          if authenticated
+                          else {}
+                      ),
+                  },
+              )
 
-              headers = {
-                  "User-Agent": "crypto-radar-readonly/2.1",
-                  "Accept": "application/json",
-              }
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read().decode())
 
-              if auth_required:
-                  headers["Authorization"] = "Basic " + auth
-
-              last_err = None
-
-              for attempt in range(retries + 1):
-                  try:
-                      req = urllib.request.Request(
-                          url,
-                          headers=headers,
-                          method="GET",
-                      )
-
-                      with urllib.request.urlopen(
-                          req,
-                          timeout=25,
-                      ) as resp:
-                          return json.loads(
-                              resp.read().decode("utf-8")
-                          )
-
-                  except Exception as exc:
-                      last_err = exc
-
-                      if attempt < retries:
-                          time.sleep(
-                              1.5 * (attempt + 1)
-                          )
-
-              raise last_err
-
-          def safe_decimal(value, default="0"):
+          def dec(v):
               try:
-                  return Decimal(str(value))
-              except (
-                  InvalidOperation,
-                  TypeError,
-                  ValueError,
-              ):
-                  return Decimal(default)
+                  return Decimal(str(v))
+              except (InvalidOperation, TypeError, ValueError):
+                  return Decimal("0")
 
-          def fetch_account_transactions(account_id):
-              data = get(
-                  f"/api/1/accounts/{urllib.parse.quote(str(account_id))}"
-                  "/transactions?min_row=-1000&max_row=0",
-                  True,
-              )
+          # ------------------------------------------------------------
+          # 1. Read ALL Luno balances/accounts
+          # ------------------------------------------------------------
 
-              txs = list(
-                  data.get("transactions", [])
-              )
+          balance_payload = get("/api/1/balance", True)
+          balances = balance_payload.get("balance", [])
 
-              seen = {
-                  str(t.get("row_index"))
-                  for t in txs
-              }
+          wanted_accounts = []
 
-              while txs and len(txs) < 20000:
+          for account in balances:
+              asset = str(account.get("asset", "")).upper()
 
-                  rows = [
-                      int(t.get("row_index", 0))
-                      for t in txs
-                      if str(
-                          t.get("row_index", "")
-                      ).lstrip("-").isdigit()
-                  ]
-
-                  if not rows:
-                      break
-
-                  oldest = min(rows)
-
-                  if oldest <= 1:
-                      break
-
-                  next_max = oldest
-                  next_min = max(
-                      1,
-                      next_max - 1000,
-                  )
-
-                  older = get(
-                      f"/api/1/accounts/"
-                      f"{urllib.parse.quote(str(account_id))}"
-                      f"/transactions?"
-                      f"min_row={next_min}&"
-                      f"max_row={next_max}",
-                      True,
-                  ).get("transactions", [])
-
-                  added = 0
-
-                  for t in older:
-                      idx = str(
-                          t.get("row_index")
-                      )
-
-                      if idx not in seen:
-                          seen.add(idx)
-                          txs.append(t)
-                          added += 1
-
-                  if added == 0:
-                      break
-
-              txs.sort(
-                  key=lambda t: (
-                      int(
-                          t.get(
-                              "timestamp",
-                              0,
-                          ) or 0
-                      ),
-                      int(
-                          t.get(
-                              "row_index",
-                              0,
-                          ) or 0
-                      ),
-                  )
-              )
-
-              return txs
-
-          def trade_from_account_tx(asset, tx):
-
-              details = (
-                  tx.get("detail_fields")
-                  or {}
-              )
-
-              td = (
-                  details.get("trade_details")
-                  or {}
-              )
-
-              pair = str(
-                  td.get("pair")
-                  or ""
-              ).upper()
-
-              expected_pair = f"{asset}MYR"
-
-              if pair != expected_pair:
-                  return None
-
-              delta = safe_decimal(
-                  tx.get("balance_delta")
-              )
-
-              price = safe_decimal(
-                  td.get("price")
-              )
-
-              volume = safe_decimal(
-                  td.get("volume")
-              )
-
-              qty = (
-                  abs(delta)
-                  if delta != 0
-                  else abs(volume)
-              )
-
-              if qty <= 0 or price <= 0:
-                  return None
-
-              side = (
-                  "buy"
-                  if delta > 0
-                  else "sell"
-                  if delta < 0
-                  else "unknown"
-              )
-
-              if side == "unknown":
-
-                  desc = str(
-                      tx.get("description")
-                      or ""
-                  ).lower()
-
-                  if "buy" in desc:
-                      side = "buy"
-
-                  elif "sell" in desc:
-                      side = "sell"
-
-              return {
-                  "side": side,
-                  "qty": str(qty),
-                  "priceMYR": str(price),
-                  "valueMYR": str(
-                      qty * price
-                  ),
-                  "timestamp": int(
-                      tx.get(
-                          "timestamp",
-                          0,
-                      ) or 0
-                  ),
-                  "rowIndex": tx.get(
-                      "row_index"
-                  ),
-                  "accountId": str(
-                      tx.get("account_id")
-                      or ""
-                  ),
-                  "kind": tx.get("kind"),
-                  "reference": tx.get(
-                      "reference"
-                  ),
-              }
-
-          def trade_from_listtrade(tr):
-
-              qty = abs(
-                  safe_decimal(
-                      tr.get("volume")
-                  )
-              )
-
-              price = safe_decimal(
-                  tr.get("price")
-              )
-
-              if qty <= 0 or price <= 0:
-                  return None
-
-              is_buy = tr.get("is_buy")
-
-              side = (
-                  "buy"
-                  if is_buy is True
-                  else "sell"
-                  if is_buy is False
-                  else "unknown"
-              )
-
-              return {
-                  "side": side,
-                  "qty": str(qty),
-                  "priceMYR": str(price),
-                  "valueMYR": str(
-                      qty * price
-                  ),
-                  "timestamp": int(
-                      tr.get(
-                          "timestamp",
-                          0,
-                      ) or 0
-                  ),
-                  "sequence": tr.get(
-                      "sequence"
-                  ),
-                  "orderId": tr.get(
-                      "order_id"
-                  ),
-                  "source": "listtrades",
-              }
-
-          def summarize_trades(trades):
-
-              qty = Decimal("0")
-              cost = Decimal("0")
-
-              buys = 0
-              sells = 0
-
-              buy_value_total = Decimal("0")
-              buy_qty_total = Decimal("0")
-
-              for tr in sorted(
-                  trades,
-                  key=lambda x: int(
-                      x.get(
-                          "timestamp",
-                          0,
-                      ) or 0
-                  ),
-              ):
-
-                  side = tr.get("side")
-
-                  q = safe_decimal(
-                      tr.get("qty")
-                  )
-
-                  p = safe_decimal(
-                      tr.get("priceMYR")
-                  )
-
-                  if q <= 0 or p <= 0:
-                      continue
-
-                  if side == "buy":
-
-                      buys += 1
-
-                      qty += q
-                      cost += q * p
-
-                      buy_qty_total += q
-                      buy_value_total += q * p
-
-                  elif side == "sell":
-
-                      sells += 1
-
-                      if qty > 0:
-
-                          reduce_q = min(
-                              q,
-                              qty,
-                          )
-
-                          avg = (
-                              cost / qty
-                              if qty > 0
-                              else Decimal("0")
-                          )
-
-                          cost -= (
-                              reduce_q * avg
-                          )
-
-                          qty -= reduce_q
-
-                          if qty <= Decimal(
-                              "0.000000000000000001"
-                          ):
-                              qty = Decimal("0")
-                              cost = Decimal("0")
-
-              avg_all_buys = (
-                  buy_value_total
-                  / buy_qty_total
-                  if buy_qty_total > 0
-                  else None
-              )
-
-              avg_remaining = (
-                  cost / qty
-                  if qty > 0
-                  else None
-              )
-
-              return {
-                  "buyCount": buys,
-                  "sellCount": sells,
-                  "trackedQty": str(qty),
-                  "trackedCostMYR": str(cost),
-                  "avgBuyMYR": (
-                      str(avg_remaining)
-                      if avg_remaining
-                      is not None
-                      else None
-                  ),
-                  "avgAllBuysMYR": (
-                      str(avg_all_buys)
-                      if avg_all_buys
-                      is not None
-                      else None
-                  ),
-              }
-
-          balance_response = get(
-              "/api/1/balance",
-              True,
-          )
-
-          balances = balance_response.get(
-              "balance",
-              [],
-          )
-
-          tx_by_asset = {
-              "XBT": [],
-              "ETH": [],
-          }
-
-          tx_meta = {
-              "XBT": [],
-              "ETH": [],
-          }
-
-          for bal in balances:
-
-              asset = str(
-                  bal.get("asset")
-                  or ""
-              ).upper()
-
-              if asset not in tx_by_asset:
+              if asset not in ("XBT", "BTC", "ETH"):
                   continue
 
-              account_id = bal.get(
-                  "account_id"
-              )
+              account_id = str(account.get("account_id", "")).strip()
 
               if not account_id:
                   continue
 
+              wanted_accounts.append({
+                  "account_id": account_id,
+                  "asset": "XBT" if asset == "BTC" else asset,
+                  "account_type": account.get("account_type"),
+                  "balance": account.get("balance"),
+                  "reserved": account.get("reserved"),
+                  "unconfirmed": account.get("unconfirmed"),
+                  "name": account.get("name"),
+              })
+
+          print("Relevant Luno accounts:", len(wanted_accounts))
+
+          for a in wanted_accounts:
+              print(
+                  "Account",
+                  a["account_id"],
+                  a["asset"],
+                  a.get("account_type"),
+                  a.get("balance"),
+              )
+
+          # ------------------------------------------------------------
+          # 2. Read transaction history for every BTC / ETH account
+          # ------------------------------------------------------------
+
+          def fetch_account_transactions(account_id):
+              all_rows = []
+
+              # First get up to 1000 newest rows.
+              path = (
+                  f"/api/1/accounts/{account_id}/transactions"
+                  "?min_row=-1000&max_row=0"
+              )
+
+              data = get(path, True)
+              rows = data.get("transactions", []) or []
+
+              all_rows.extend(rows)
+
+              # If exactly 1000 returned, continue backwards.
+              while len(rows) >= 1000:
+                  indexes = []
+
+                  for row in rows:
+                      try:
+                          indexes.append(int(row.get("row_index")))
+                      except Exception:
+                          pass
+
+                  if not indexes:
+                      break
+
+                  oldest = min(indexes)
+
+                  if oldest <= 1:
+                      break
+
+                  max_row = oldest
+                  min_row = max(1, max_row - 1000)
+
+                  path = (
+                      f"/api/1/accounts/{account_id}/transactions"
+                      f"?min_row={min_row}&max_row={max_row}"
+                  )
+
+                  data = get(path, True)
+                  rows = data.get("transactions", []) or []
+
+                  if not rows:
+                      break
+
+                  all_rows.extend(rows)
+
+              # Deduplicate using row_index.
+              unique = {}
+
+              for row in all_rows:
+                  idx = str(row.get("row_index", ""))
+
+                  if idx:
+                      unique[idx] = row
+
+              result = list(unique.values())
+
+              result.sort(
+                  key=lambda x: int(x.get("row_index", 0))
+              )
+
+              return result
+
+          accounts_with_transactions = []
+
+          for account in wanted_accounts:
+              aid = account["account_id"]
+
               try:
+                  txs = fetch_account_transactions(aid)
+                  print(
+                      "Transactions:",
+                      account["asset"],
+                      account.get("account_type"),
+                      aid,
+                      len(txs),
+                  )
+              except Exception as e:
+                  print(
+                      "Transaction read failed:",
+                      aid,
+                      repr(e),
+                  )
+                  txs = []
 
-                  txs = fetch_account_transactions(
-                      account_id
+              item = dict(account)
+              item["transactions"] = txs
+              accounts_with_transactions.append(item)
+
+          # ------------------------------------------------------------
+          # 3. Convert Luno account trade entries into normalized trades
+          #
+          # Existing Crypto Radar expects:
+          # is_buy / price / volume / timestamp
+          # ------------------------------------------------------------
+
+          def normalise_trade(asset, tx):
+              details = tx.get("detail_fields") or {}
+              trade = details.get("trade_details") or {}
+
+              if not trade:
+                  return None
+
+              pair = str(trade.get("pair", "")).upper()
+
+              # Malaysia MYR pairs only for current Crypto Radar.
+              allowed_pairs = (
+                  ("XBTMYR", "BTCMYR")
+                  if asset == "XBT"
+                  else ("ETHMYR",)
+              )
+
+              if pair not in allowed_pairs:
+                  return None
+
+              price = dec(trade.get("price"))
+              volume = abs(dec(trade.get("volume")))
+
+              # Prefer actual asset account balance movement.
+              delta = dec(tx.get("balance_delta"))
+
+              if volume <= 0 and delta != 0:
+                  volume = abs(delta)
+
+              if price <= 0 or volume <= 0:
+                  return None
+
+              # Crypto asset entering wallet = BUY.
+              # Crypto asset leaving wallet through a trade = SELL.
+              is_buy = delta > 0
+
+              return {
+                  "is_buy": bool(is_buy),
+                  "price": str(price),
+                  "volume": str(volume),
+                  "timestamp": int(tx.get("timestamp") or 0),
+                  "pair": pair,
+                  "source": "account_transaction",
+                  "account_id": str(tx.get("account_id", "")),
+                  "row_index": tx.get("row_index"),
+                  "kind": tx.get("kind"),
+                  "description": tx.get("description"),
+                  "balance_delta": str(tx.get("balance_delta", "0")),
+              }
+
+          btc_trades = []
+          eth_trades = []
+
+          for account in accounts_with_transactions:
+              asset = account["asset"]
+
+              for tx in account["transactions"]:
+                  t = normalise_trade(asset, tx)
+
+                  if not t:
+                      continue
+
+                  if asset == "XBT":
+                      btc_trades.append(t)
+
+                  elif asset == "ETH":
+                      eth_trades.append(t)
+
+          def dedupe_trades(rows):
+              seen = set()
+              result = []
+
+              for t in rows:
+                  k = (
+                      t.get("account_id"),
+                      t.get("row_index"),
+                      t.get("timestamp"),
+                      t.get("price"),
+                      t.get("volume"),
+                      t.get("is_buy"),
                   )
 
-                  tx_by_asset[
-                      asset
-                  ].extend(txs)
+                  if k in seen:
+                      continue
 
-                  tx_meta[
-                      asset
-                  ].append({
-                      "accountId": str(
-                          account_id
-                      ),
-                      "accountType": bal.get(
-                          "account_type"
-                      ),
-                      "name": bal.get(
-                          "name"
-                      ),
-                      "rows": len(txs),
-                  })
+                  seen.add(k)
+                  result.append(t)
 
-              except Exception as exc:
+              result.sort(
+                  key=lambda x: int(x.get("timestamp") or 0)
+              )
 
-                  tx_meta[
-                      asset
-                  ].append({
-                      "accountId": str(
-                          account_id
-                      ),
-                      "accountType": bal.get(
-                          "account_type"
-                      ),
-                      "name": bal.get(
-                          "name"
-                      ),
-                      "rows": 0,
-                      "error":
-                          f"{type(exc).__name__}: {exc}",
-                  })
+              return result
 
-          account_trades = {
-              "XBT": [],
-              "ETH": [],
-          }
+          btc_trades = dedupe_trades(btc_trades)
+          eth_trades = dedupe_trades(eth_trades)
 
-          for asset in (
-              "XBT",
-              "ETH",
-          ):
+          print("BTC trade records found:", len(btc_trades))
+          print("ETH trade records found:", len(eth_trades))
 
-              for tx in tx_by_asset[
-                  asset
-              ]:
-
-                  tr = trade_from_account_tx(
-                      asset,
-                      tx,
-                  )
-
-                  if tr:
-                      tr[
-                          "source"
-                      ] = "account_transactions"
-
-                      account_trades[
-                          asset
-                      ].append(tr)
-
-          list_trades = {
-              "XBT": [],
-              "ETH": [],
-          }
+          # ------------------------------------------------------------
+          # 4. Public MYR ticker snapshot
+          # ------------------------------------------------------------
 
           warnings = []
 
-          for asset, pair in (
-              ("XBT", "XBTMYR"),
-              ("ETH", "ETHMYR"),
-          ):
-
-              try:
-
-                  raw = get(
-                      f"/api/1/listtrades?"
-                      f"pair={pair}&"
-                      f"limit=1000&"
-                      f"sort_desc=false",
-                      True,
-                  ).get(
-                      "trades",
-                      [],
-                  )
-
-                  list_trades[
-                      asset
-                  ] = [
-                      x
-                      for x in (
-                          trade_from_listtrade(t)
-                          for t in raw
-                      )
-                      if x
-                  ]
-
-              except Exception as exc:
-
-                  warnings.append(
-                      f"{pair} listtrades unavailable: "
-                      f"{type(exc).__name__}: {exc}"
-                  )
-
-          chosen_trades = {}
-          summaries = {}
-
-          for asset in (
-              "XBT",
-              "ETH",
-          ):
-
-              chosen = (
-                  account_trades[
-                      asset
-                  ]
-                  if account_trades[
-                      asset
-                  ]
-                  else list_trades[
-                      asset
-                  ]
+          try:
+              btc_myr = get(
+                  "/api/1/ticker?pair=XBTMYR",
+                  False,
+              ).get("last_trade")
+          except Exception as e:
+              btc_myr = None
+              warnings.append(
+                  "XBTMYR ticker unavailable: " + repr(e)
               )
 
-              chosen_trades[
-                  asset
-              ] = chosen
-
-              summaries[
-                  asset
-              ] = summarize_trades(
-                  chosen
+          try:
+              eth_myr = get(
+                  "/api/1/ticker?pair=ETHMYR",
+                  False,
+              ).get("last_trade")
+          except Exception as e:
+              eth_myr = None
+              warnings.append(
+                  "ETHMYR ticker unavailable: " + repr(e)
               )
 
-              summaries[
-                  asset
-              ]["source"] = (
-                  "account_transactions"
-                  if account_trades[
-                      asset
-                  ]
-                  else "listtrades"
-                  if list_trades[
-                      asset
-                  ]
-                  else "none"
-              )
+          # ------------------------------------------------------------
+          # 5. Build encrypted snapshot
+          # ------------------------------------------------------------
 
-              summaries[
-                  asset
-              ]["accountTradeRows"] = len(
-                  account_trades[
-                      asset
-                  ]
-              )
-
-              summaries[
-                  asset
-              ]["listTradeRows"] = len(
-                  list_trades[
-                      asset
-                  ]
-              )
-
-          current_prices = {}
-
-          for asset, pair in (
-              ("XBT", "XBTMYR"),
-              ("ETH", "ETHMYR"),
-          ):
-
-              try:
-
-                  ticker = get(
-                      f"/api/1/ticker?"
-                      f"pair={pair}",
-                      False,
-                  )
-
-                  current_prices[
-                      asset
-                  ] = ticker.get(
-                      "last_trade"
-                  )
-
-              except Exception as exc:
-
-                  current_prices[
-                      asset
-                  ] = None
-
-                  warnings.append(
-                      f"{pair} ticker unavailable: "
-                      f"{type(exc).__name__}: {exc}"
-                  )
-
-          tx_diagnostics = {}
-
-          for asset in (
-              "XBT",
-              "ETH",
-          ):
-
-              kinds = {}
-
-              with_trade_details = 0
-              positive = 0
-              negative = 0
-
-              for tx in tx_by_asset[
-                  asset
-              ]:
-
-                  kind = str(
-                      tx.get("kind")
-                      or "UNKNOWN"
-                  )
-
-                  kinds[
-                      kind
-                  ] = (
-                      kinds.get(
-                          kind,
-                          0,
-                      )
-                      + 1
-                  )
-
-                  if (
-                      (
-                          tx.get(
-                              "detail_fields"
-                          )
-                          or {}
-                      ).get(
-                          "trade_details"
-                      )
-                      or {}
-                  ):
-                      with_trade_details += 1
-
-                  d = safe_decimal(
-                      tx.get(
-                          "balance_delta"
-                      )
-                  )
-
-                  if d > 0:
-                      positive += 1
-
-                  elif d < 0:
-                      negative += 1
-
-              tx_diagnostics[
-                  asset
-              ] = {
-                  "accounts": tx_meta[
-                      asset
-                  ],
-                  "totalRows": len(
-                      tx_by_asset[
-                          asset
-                      ]
-                  ),
-                  "tradeDetailRows":
-                      with_trade_details,
-                  "positiveRows":
-                      positive,
-                  "negativeRows":
-                      negative,
-                  "kinds": kinds,
-              }
+          generated_at = datetime.datetime.now(
+              datetime.timezone.utc
+          ).isoformat()
 
           payload = {
-              "schema":
-                  "crypto-radar-luno-snapshot-v2",
+              "schema": "crypto-radar-luno-snapshot-v2",
+              "generatedAt": generated_at,
 
-              "generatedAt":
-                  datetime.datetime.now(
-                      datetime.timezone.utc
-                  ).isoformat(),
+              # Keep old fields so current v2.0 App can still read them.
+              "balances": balances,
+              "btcTrades": btc_trades,
+              "ethTrades": eth_trades,
+              "btcMYR": btc_myr,
+              "ethMYR": eth_myr,
 
-              "balances":
-                  balances,
-
-              "btcTrades":
-                  list_trades["XBT"],
-
-              "ethTrades":
-                  list_trades["ETH"],
-
-              "btcMYR":
-                  current_prices["XBT"],
-
-              "ethMYR":
-                  current_prices["ETH"],
-
-              "costBasis": {
-                  "XBT":
-                      summaries["XBT"],
-                  "ETH":
-                      summaries["ETH"],
+              # New v2.1 fields.
+              "accounts": accounts_with_transactions,
+              "historySource": "account_transactions",
+              "tradeCounts": {
+                  "btc": len(btc_trades),
+                  "eth": len(eth_trades),
               },
-
-              "tradeLedger": {
-                  "XBT":
-                      chosen_trades["XBT"],
-                  "ETH":
-                      chosen_trades["ETH"],
-              },
-
-              "transactionDiagnostics":
-                  tx_diagnostics,
-
-              "warnings":
-                  warnings,
+              "warnings": warnings,
           }
-
-          print(
-              "===== SAFE LUNO DIAGNOSTIC ====="
-          )
-
-          for asset in (
-              "XBT",
-              "ETH",
-          ):
-
-              d = tx_diagnostics[
-                  asset
-              ]
-
-              s = summaries[
-                  asset
-              ]
-
-              print(
-                  f"{asset}: "
-                  f"accounts="
-                  f"{len(d['accounts'])}, "
-                  f"transaction_rows="
-                  f"{d['totalRows']}, "
-                  f"trade_detail_rows="
-                  f"{d['tradeDetailRows']}, "
-                  f"chosen_source="
-                  f"{s['source']}, "
-                  f"buys="
-                  f"{s['buyCount']}, "
-                  f"sells="
-                  f"{s['sellCount']}, "
-                  f"tracked_qty="
-                  f"{s['trackedQty']}, "
-                  f"avg_buy_myr="
-                  f"{s['avgBuyMYR']}"
-              )
-
-              for a in d[
-                  "accounts"
-              ]:
-
-                  print(
-                      f"  account "
-                      f"{a.get('accountId')} "
-                      f"type="
-                      f"{a.get('accountType')} "
-                      f"rows="
-                      f"{a.get('rows')}"
-                      + (
-                          f" ERROR="
-                          f"{a.get('error')}"
-                          if a.get(
-                              "error"
-                          )
-                          else ""
-                      )
-                  )
-
-          if warnings:
-
-              print("Warnings:")
-
-              for w in warnings:
-                  print(
-                      " -",
-                      w,
-                  )
-
-          print(
-              "================================"
-          )
 
           plain = json.dumps(
               payload,
-              separators=(
-                  ",",
-                  ":",
-              ),
+              separators=(",", ":"),
               ensure_ascii=False,
-          ).encode("utf-8")
+          ).encode()
 
           iv = os.urandom(12)
+          aad = b"crypto-radar-luno-v1"
 
-          aad = (
-              b"crypto-radar-luno-v1"
-          )
-
-          ct = AESGCM(
-              sync_key
-          ).encrypt(
+          ct = AESGCM(sync_key).encrypt(
               iv,
               plain,
               aad,
@@ -904,57 +411,48 @@ jobs:
 
           out = {
               "v": 1,
-              "alg":
-                  "AES-256-GCM",
-              "iv":
-                  base64.b64encode(
-                      iv
-                  ).decode(),
-              "ct":
-                  base64.b64encode(
-                      ct
-                  ).decode(),
-              "updatedAt":
-                  payload[
-                      "generatedAt"
-                  ],
+              "alg": "AES-256-GCM",
+              "iv": base64.b64encode(iv).decode(),
+              "ct": base64.b64encode(ct).decode(),
+              "updatedAt": generated_at,
           }
 
-          pathlib.Path(
-              "data"
-          ).mkdir(
-              exist_ok=True
-          )
+          pathlib.Path("data").mkdir(exist_ok=True)
 
           pathlib.Path(
               "data/luno.enc.json"
           ).write_text(
               json.dumps(
                   out,
-                  separators=(
-                      ",",
-                      ":",
-                  ),
+                  separators=(",", ":"),
               ),
               encoding="utf-8",
           )
 
-          print(
-              "Encrypted Luno snapshot v2 created successfully"
-          )
+          print("Encrypted Luno snapshot created successfully")
+          print("BTC trades:", len(btc_trades))
+          print("ETH trades:", len(eth_trades))
+
+          if warnings:
+              print("Warnings:")
+              for w in warnings:
+                  print("-", w)
           PY
 
       - name: Commit encrypted snapshot
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "crypto-radar-bot"
+          git config user.email "crypto-radar-bot@users.noreply.github.com"
 
           git add data/luno.enc.json
 
           if git diff --cached --quiet; then
-            echo "No snapshot change to commit."
+            echo "No snapshot change"
             exit 0
           fi
 
           git commit -m "Update encrypted Luno snapshot"
-          git push
+
+          git pull --rebase origin main
+
+          git push origin main
