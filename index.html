@@ -11,12 +11,19 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="styles.css?v=1.9.0" />
+
+  <style>
+    details.simple-details > summary{cursor:pointer;list-style:none;padding:4px 0;font-size:1rem;color:#eef6ff}
+    details.simple-details > summary::-webkit-details-marker{display:none}
+    details.simple-details > summary::after{content:"＋";float:right;color:#7bd4ff}
+    details.simple-details[open] > summary::after{content:"−"}
+  </style>
 </head>
 <body>
   <div id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LOCAL · READ ONLY · v1.9.1</div>
+        <div class="eyebrow">LOCAL · READ ONLY · v2.0</div>
         <h1>Crypto Radar</h1>
       </div>
       <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
@@ -28,7 +35,7 @@
       <button data-tab="home" class="tab active"><span>⌂</span><small>首页</small></button>
       <button data-tab="portfolio" class="tab"><span>◫</span><small>持仓</small></button>
       <button data-tab="market" class="tab"><span>⌁</span><small>市场</small></button>
-      <button data-tab="settings" class="tab"><span>⚙</span><small>状态</small></button>
+      <button data-tab="settings" class="tab"><span>⚙</span><small>设置</small></button>
     </nav>
   </div>
 
@@ -47,7 +54,7 @@
   <dialog id="lunoDialog" class="modal small">
     <div class="eyebrow">LUNO · ENCRYPTED READ ONLY</div>
     <h2>连接 Luno 加密快照</h2>
-    <div class="notice warning">Safari 不能直接读取 Luno 私有 API。v1.9.1 改用 <b>GitHub Actions</b> 在服务器端读取 Read-only Luno，再把资料用 256-bit Sync Key 加密后放回你自己的 GitHub Pages。API Key 不会放进网页。</div>
+    <div class="notice warning">Safari 不能直接读取 Luno 私有 API。v2.0 使用 <b>GitHub Actions</b> 在服务器端读取 Read-only Luno，再把资料用 256-bit Sync Key 加密后放回你自己的 GitHub Pages。API Key 不会放进网页。</div>
     <form id="lunoForm">
       <label>Sync Key（64 位 HEX）</label>
       <input id="lunoSyncKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="64 位 Sync Key" />
@@ -77,6 +84,6 @@
   </dialog>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="app-live191.js?v=1.9.1" defer></script>
+  <script src="app-live20.js?v=2.0.0" defer></script>
 </body>
 </html>
